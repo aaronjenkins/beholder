@@ -996,9 +996,25 @@ async def admin_create_stream(body: dict):
     return {"ok": True, "tag": tag}
 
 
+@app.get("/api/admin/status", tags=["Admin"], dependencies=[Depends(require_admin)])
+async def admin_status():
+    """YT key configuration and block status (keys are not returned)."""
+    now = time.time()
+    return {
+        "yt_key_1": {
+            "configured": bool(YT_KEY_1),
+            "blocked_until": _yt_blocked_until_1 if _yt_blocked_until_1 and now < _yt_blocked_until_1 else None,
+        },
+        "yt_key_2": {
+            "configured": bool(YT_KEY_2),
+            "blocked_until": _yt_blocked_until_2 if _yt_blocked_until_2 and now < _yt_blocked_until_2 else None,
+        },
+    }
+
+
 @app.post("/api/admin/streams/rescrape", tags=["Admin"], dependencies=[Depends(require_admin)])
-async def admin_rescrape_streams():
-    """Manually trigger a refresh of all streams via RSS + YouTube Data API."""
+async def admin_rescrape_streams(key: Optional[int] = None):
+    """Manually trigger a refresh. key=1 → rotating only, key=2 → stable only, omit → both."""
     async with app.state.pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT tag, channel_id, video_id, stable_video_id FROM streams "
@@ -1007,8 +1023,10 @@ async def admin_rescrape_streams():
     if not rows:
         return {"ok": True, "updated": 0, "skipped": 0, "message": "No streams with channel_id"}
 
-    stable_rows   = [r for r in rows if r["stable_video_id"]]
-    rotating_rows = [r for r in rows if not r["stable_video_id"]]
+    all_stable   = [r for r in rows if r["stable_video_id"]]
+    all_rotating = [r for r in rows if not r["stable_video_id"]]
+    stable_rows   = all_stable   if key in (None, 2) else []
+    rotating_rows = all_rotating if key in (None, 1) else []
 
     async with httpx.AsyncClient(timeout=30) as client:
         channel_videos: dict[str, list[str]] = {}

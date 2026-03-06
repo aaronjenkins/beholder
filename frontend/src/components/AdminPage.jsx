@@ -369,35 +369,60 @@ function AddModal({ token, onClose, onCreated }) {
 
 // ── Main admin page ─────────────────────────────────────────────────────────────
 
+function KeyStatusCard({ label, desc, keyStatus, onRun, running }) {
+  const blocked = keyStatus?.blocked_until
+  const configured = keyStatus?.configured
+
+  function fmtTime(ts) {
+    return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  return (
+    <div className="adm-status-card">
+      <div className="adm-status-card-header">
+        <span className="adm-status-card-title">{label}</span>
+        <span className="adm-status-card-desc">{desc}</span>
+      </div>
+      <div className="adm-status-row">
+        <span className="adm-status-label">Key</span>
+        <span className={`adm-status-badge ${configured ? 'adm-status-badge--ok' : 'adm-status-badge--warn'}`}>
+          {configured ? 'Configured' : 'Not set'}
+        </span>
+      </div>
+      <div className="adm-status-row">
+        <span className="adm-status-label">API</span>
+        <span className={`adm-status-badge ${blocked ? 'adm-status-badge--err' : 'adm-status-badge--ok'}`}>
+          {blocked ? `Blocked until ${fmtTime(blocked)} tomorrow` : 'Active'}
+        </span>
+      </div>
+      <button
+        className="adm-btn adm-btn--primary adm-btn--sm adm-status-run"
+        onClick={onRun}
+        disabled={running || !configured}
+      >
+        <i className={`fas fa-arrows-rotate${running ? ' adm-spin' : ''}`} />
+        {running ? ' Running…' : ' Run Now'}
+      </button>
+    </div>
+  )
+}
+
 export default function AdminPage() {
   const [token, setToken] = useState(() => localStorage.getItem('adm_token') || '')
   const [authPhase, setAuthPhase] = useState(token ? 'done' : 'phone')
   const [authPhone, setAuthPhone] = useState('')
   const [authMethodId, setAuthMethodId] = useState('')
 
-  const [streams, setStreams] = useState([])
-  const [filter, setFilter] = useState('')
   const [showAdd, setShowAdd] = useState(false)
-  const [deleteConfirm, setDeleteConfirm] = useState(null)
-  const [saving, setSaving] = useState({})
-  const [rebuilding, setRebuilding] = useState({})
-  const [showLogs, setShowLogs] = useState(false)
+  const [keyStatus, setKeyStatus] = useState(null)
+  const [running, setRunning] = useState({})
   const [logs, setLogs] = useState([])
   const [logsLoading, setLogsLoading] = useState(false)
   const logsEndRef = useRef(null)
 
-  const load = useCallback(async (tok = token) => {
-    if (!tok) return
-    const res = await authFetch('/api/admin/streams', {}, tok)
-    if (res.status === 401) { logout(); return }
-    setStreams(await res.json())
-  }, [token])
-
-  useEffect(() => { if (authPhase === 'done') load() }, [authPhase])
-
   function logout() {
     localStorage.removeItem('adm_token')
-    setToken(''); setAuthPhase('phone'); setStreams([])
+    setToken(''); setAuthPhase('phone')
   }
 
   function onVerified(tok) {
@@ -405,29 +430,11 @@ export default function AdminPage() {
     setToken(tok); setAuthPhase('done')
   }
 
-  async function saveField(tag, field, value) {
-    const key = `${tag}.${field}`
-    setSaving(s => ({ ...s, [key]: true }))
-    // Optimistic update
-    setStreams(s => s.map(r => r.tag === tag ? { ...r, [field]: value } : r))
-    // Auto-fill bias_color and bias_title when bias_label changes
-    if (field === 'bias_label') {
-      const b = BIAS_OPTIONS.find(o => o.label === value)
-      if (b) {
-        setStreams(s => s.map(r => r.tag === tag ? { ...r, bias_color: b.color, bias_title: b.title } : r))
-        await authFetch(`/api/admin/streams/${tag}`, {
-          method: 'PUT',
-          body: JSON.stringify({ bias_label: b.label || null, bias_color: b.color || null, bias_title: b.title || null }),
-        }, token)
-        setSaving(s => { const n = { ...s }; delete n[key]; return n })
-        return
-      }
-    }
-    await authFetch(`/api/admin/streams/${tag}`, {
-      method: 'PUT',
-      body: JSON.stringify({ [field]: value }),
-    }, token)
-    setSaving(s => { const n = { ...s }; delete n[key]; return n })
+  async function loadStatus(tok = token) {
+    try {
+      const res = await authFetch('/api/admin/status', {}, tok)
+      if (res.ok) setKeyStatus(await res.json())
+    } catch {}
   }
 
   async function loadLogs(tok = token) {
@@ -439,47 +446,31 @@ export default function AdminPage() {
   }
 
   useEffect(() => {
-    if (showLogs) loadLogs()
-  }, [showLogs])
+    if (authPhase !== 'done') return
+    loadStatus()
+    loadLogs()
+    const t = setInterval(() => { loadStatus(); loadLogs() }, 30_000)
+    return () => clearInterval(t)
+  }, [authPhase])
 
   useEffect(() => {
-    if (showLogs) logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [logs, showLogs])
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [logs])
 
-  async function rebuild(tag, link) {
-    const m = link?.match(/@([^/?#]+)/)
-    if (!m) return
-    setRebuilding(r => ({ ...r, [tag]: true }))
+  async function runScrape(keyNum) {
+    const k = keyNum ?? 'all'
+    setRunning(r => ({ ...r, [k]: true }))
     try {
-      const res = await fetch('/api/admin/streams/lookup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ handle: m[1] }),
-      })
-      const data = await res.json()
-      if (!res.ok) return
-      const update = { name: data.name }
-      if (data.video_id) update.video_id = data.video_id
-      if (data.channel_id) update.channel_id = data.channel_id
-      if (data.icon_url) update.icon_url = data.icon_url
-      await authFetch(`/api/admin/streams/${tag}`, { method: 'PUT', body: JSON.stringify(update) }, token)
-      setStreams(s => s.map(r => r.tag === tag ? { ...r, ...update } : r))
-    } finally {
-      setRebuilding(r => { const n = { ...r }; delete n[tag]; return n })
+      const url = keyNum ? `/api/admin/streams/rescrape?key=${keyNum}` : '/api/admin/streams/rescrape'
+      const res = await authFetch(url, { method: 'POST' }, token)
+      if (res.status === 401) { logout(); return }
+    } catch {}
+    finally {
+      setRunning(r => { const n = { ...r }; delete n[k]; return n })
+      await Promise.all([loadStatus(), loadLogs()])
     }
   }
 
-  async function deleteStream(tag) {
-    await authFetch(`/api/admin/streams/${tag}`, { method: 'DELETE' }, token)
-    setStreams(s => s.filter(r => r.tag !== tag))
-    setDeleteConfirm(null)
-  }
-
-  const filtered = filter
-    ? streams.filter(s =>
-        [s.tag, s.name, s.region, s.subregion, s.link].some(v => v?.toLowerCase().includes(filter.toLowerCase()))
-      )
-    : streams;
   if (authPhase === 'phone') {
     return <PhasePhone onSent={(phone, methodId) => { setAuthPhone(phone); setAuthMethodId(methodId); setAuthPhase('otp') }} />
   }
@@ -491,16 +482,45 @@ export default function AdminPage() {
     <div className="adm-page">
       <div className="adm-topbar">
         <span className="adm-topbar-title">BEHOLDER <span className="adm-topbar-sub">ADMIN</span></span>
-        <input className="adm-search" placeholder="Filter streams…" value={filter} onChange={e => setFilter(e.target.value)} />
-        <span className="adm-count">{filtered.length} / {streams.length}</span>
+        <div style={{ flex: 1 }} />
         <button className="adm-btn adm-btn--accent" onClick={() => setShowAdd(true)}>+ Add Stream</button>
-        <button className={'adm-btn adm-btn--ghost' + (showLogs ? ' adm-btn--active' : '')} onClick={() => setShowLogs(v => !v)}>
-          <i className="fas fa-terminal" /> Logs
-        </button>
         <button className="adm-btn adm-btn--ghost" onClick={logout}>Logout</button>
       </div>
-      {showAdd && <AddModal token={token} onClose={() => setShowAdd(false)} onCreated={load} />}
-      {showLogs && (
+
+      {showAdd && <AddModal token={token} onClose={() => setShowAdd(false)} onCreated={() => {}} />}
+
+      <div className="adm-dashboard">
+        <div className="adm-status-row-outer">
+          <KeyStatusCard
+            label="YT Key 1"
+            desc="Rotating channels · 30 min"
+            keyStatus={keyStatus?.yt_key_1}
+            onRun={() => runScrape(1)}
+            running={!!running[1]}
+          />
+          <KeyStatusCard
+            label="YT Key 2"
+            desc="Stable channels · 6 hr"
+            keyStatus={keyStatus?.yt_key_2}
+            onRun={() => runScrape(2)}
+            running={!!running[2]}
+          />
+          <div className="adm-status-card adm-status-card--action">
+            <div className="adm-status-card-header">
+              <span className="adm-status-card-title">Both Keys</span>
+              <span className="adm-status-card-desc">Full rescrape</span>
+            </div>
+            <button
+              className="adm-btn adm-btn--primary adm-btn--sm adm-status-run"
+              onClick={() => runScrape(null)}
+              disabled={!!running['all']}
+            >
+              <i className={`fas fa-arrows-rotate${running['all'] ? ' adm-spin' : ''}`} />
+              {running['all'] ? ' Running…' : ' Run Both Now'}
+            </button>
+          </div>
+        </div>
+
         <div className="adm-logs">
           <div className="adm-logs-toolbar">
             <span className="adm-logs-title">Server Logs</span>
@@ -523,66 +543,7 @@ export default function AdminPage() {
             <div ref={logsEndRef} />
           </div>
         </div>
-      )}
-
-      <div className="adm-table-wrap">
-        <button className="adm-btn adm-btn--primary adm-btn--sm" style={{ marginBottom: 12 }} onClick={async () => {
-          try {
-            const res = await authFetch('/api/admin/streams/rescrape', { method: 'POST' }, token)
-            if (res.status === 401) { logout(); return }
-            await res.json()
-          } catch (e) {
-            /* ignore network errors for now */
-          }
-          window.location.reload()
-        }}>
-          <i className="fas fa-arrows-rotate" /> Rescrape All Streams
-        </button>
-        <table className="adm-table">
-          <thead>
-            <tr>
-              {COLS.map(c => <th key={c.key} style={{ minWidth: c.w }}>{c.label}</th>)}
-              <th className="adm-th-del">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map(row => (
-              <tr key={row.tag} className={deleteConfirm === row.tag ? 'adm-row--deleting' : ''}>
-                {COLS.map(col => (
-                  <Cell
-                    key={col.key}
-                    col={col}
-                    value={row[col.key]}
-                    onSave={v => saveField(row.tag, col.key, v)}
-                  />
-                ))}
-                <td className="adm-td adm-td-del">
-                  <span className="adm-row-actions">
-                    <button
-                      className="adm-btn adm-btn--ghost adm-btn--icon"
-                      onClick={() => rebuild(row.tag, row.link)}
-                      disabled={!!rebuilding[row.tag]}
-                      title="Rebuild from YouTube channel"
-                    >
-                      <i className={`fas fa-arrows-rotate${rebuilding[row.tag] ? ' adm-spin' : ''}`} />
-                    </button>
-                    {deleteConfirm === row.tag ? (
-                      <span className="adm-del-confirm">
-                        <button className="adm-btn adm-btn--danger adm-btn--icon" onClick={() => deleteStream(row.tag)} title="Confirm delete">✓</button>
-                        <button className="adm-btn adm-btn--ghost adm-btn--icon" onClick={() => setDeleteConfirm(null)}>✕</button>
-                      </span>
-                    ) : (
-                      <button className="adm-btn adm-btn--ghost adm-btn--icon" onClick={() => setDeleteConfirm(row.tag)} title="Delete stream">
-                        <i className="fas fa-trash" />
-                      </button>
-                    )}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
     </div>
-  );
+  )
 }
