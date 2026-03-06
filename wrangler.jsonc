@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "beholder",
   "compatibility_date": "2025-09-27",
-  "main": "src/worker.js",
+  "main": "frontend/src/worker.js",
   "assets": {
     "directory": "frontend/dist",
     "not_found_handling": "single-page-application"
