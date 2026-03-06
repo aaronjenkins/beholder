@@ -43,6 +43,8 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
     // Track menu visibility for desktop
     const [menuVisible, setMenuVisible] = useState(true)
   const [streams, setStreams] = useState([])
+  // all configured streams (live or offline) returned from /api/streams
+  const [allStreams, setAllStreams] = useState([])
   // Single source of truth: { [tag]: 'grid' | 'pinned' }
   const [watchList, setWatchList] = useState(() => {
     if (localStorage.getItem('autoplay') === 'false') return {}
@@ -97,6 +99,7 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
 
   // --- Ensure streamMap is declared before any usage ---
   const streamMap = useMemo(() => Object.fromEntries(streams.map(s => [s.tag, s])), [streams])
+  const allStreamMap = useMemo(() => Object.fromEntries(allStreams.map(s => [s.tag, s])), [allStreams])
   const count = active.length
   const activeStreams = useMemo(() =>
     Object.keys(watchList)
@@ -122,6 +125,7 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
       .then(data => {
         const live = data.filter(s => s.embed_url)
         setStreams(live)
+        setAllStreams(data)
         setWatchList(prev => Object.fromEntries(Object.entries(prev).filter(([tag]) => live.some(s => s.tag === tag))))
         setActiveOrder(prev => prev.filter(tag => live.some(s => s.tag === tag)))
       })
@@ -436,7 +440,7 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
             <div className="mobile-drawer-body">
               {regions.map(region => {
                 const allTags = region.tags ?? region.subgroups?.flatMap(sg => sg.tags) ?? []
-                const regionStreams = allTags.map(t => streamMap[t]).filter(Boolean)
+                const regionStreams = allTags.map(t => allStreamMap[t]).filter(Boolean)
                 if (regionStreams.length === 0) return null
                 const isBreakRegion = region.label === BREAK_LABEL
                 const allOn = regionStreams.every(s => active.includes(s.tag))
@@ -523,7 +527,7 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
         <div className="selector-section selector-section--regions">
         {regions.map(region => {
           const allTags = region.tags ?? region.subgroups.flatMap(sg => sg.tags)
-          const regionStreams = allTags.map(t => streamMap[t]).filter(Boolean)
+          const regionStreams = allTags.map(t => allStreamMap[t]).filter(Boolean)
           if (regionStreams.length === 0) return null
           const allOn = regionStreams.every(s => active.includes(s.tag))
           const anyOn = regionStreams.some(s => active.includes(s.tag))
@@ -545,7 +549,7 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
                 {!isBreakRegion && <span className={'region-caret' + (openRegion === region.label ? ' open' : '')}>▾</span>}
               </button>
               {!isBreakRegion && openRegion === region.label && (() => {
-                const activeSgs = region.subgroups?.filter(sg => sg.tags.some(t => streamMap[t]))
+                const activeSgs = region.subgroups?.filter(sg => sg.tags.some(t => allStreamMap[t]))
                 const cols = region.subgroups
                   ? Math.min(4, activeSgs?.length ?? 1)
                   : Math.min(4, Math.max(1, Math.ceil(regionStreams.length / 5)))
@@ -554,9 +558,9 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
                   <button className="region-all-btn" style={{ gridColumn: '1/-1' }} onClick={() => { addRegion(allTags); setOpenRegion(null) }}>
                     <FiPlus /> All
                   </button>
-                  {region.subgroups ? (
+                    {region.subgroups ? (
                     region.subgroups.map(sg => {
-                      const sgStreams = sg.tags.map(t => streamMap[t]).filter(Boolean)
+                      const sgStreams = sg.tags.map(t => allStreamMap[t]).filter(Boolean)
                       if (sgStreams.length === 0) return null
                       return (
                         <div key={sg.label} className="dropdown-subgroup">
@@ -579,15 +583,16 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
                         </div>
                       )
                     })
-                  ) : (<>
-                    {regionStreams.sort((a, b) => a.name.localeCompare(b.name)).map(s => {
-                      const on = active.includes(s.tag)
+                    ) : (<>
+                    {region.tags.sort().map(tag => {
+                      const s = allStreamMap[tag]
+                      const on = s && active.includes(s.tag)
                       return (
-                        <button key={s.tag} className={'stream-pill' + (on ? ' on' : '')} onClick={() => toggle(s.tag)} title={s.bias_title ? `${s.name} — Bias: ${s.bias_title}` : s.name}>
-                          {s.icon_url && <img src={s.icon_url} alt="" className="channel-icon" />}
-                          {s.tag}
-                          {s.bias_label && <span className="stream-bias-badge" style={{ background: s.bias_color }}>{s.bias_label}</span>}
-                          {s.government_funded && <span className="stream-gov-badge"><i className="fas fa-building-columns" /></span>}
+                        <button key={tag} className={'stream-pill' + (on ? ' on' : '') + (s ? '' : ' disabled')} onClick={() => s && toggle(s.tag)} title={s ? (s.bias_title ? `${s.name} — Bias: ${s.bias_title}` : s.name) : tag}>
+                          {s && s.icon_url && <img src={s.icon_url} alt="" className="channel-icon" />}
+                          {tag}
+                          {s && s.bias_label && <span className="stream-bias-badge" style={{ background: s.bias_color }}>{s.bias_label}</span>}
+                          {s && s.government_funded && <span className="stream-gov-badge"><i className="fas fa-building-columns" /></span>}
                         </button>
                       )
                     })}</>
