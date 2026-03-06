@@ -10,6 +10,7 @@ import re
 import secrets
 import subprocess
 import time
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -494,6 +495,14 @@ async def lifespan(app: FastAPI):
             "STYTCH_SECRET": STYTCH_SECRET,
         }.items() if not v]
         _log.warning("[admin] admin panel disabled — missing env vars: %s", ", ".join(missing))
+    # Treat build placeholders or empty values as unset and fail fast with a clear error.
+    if not DATABASE_URL or (isinstance(DATABASE_URL, str) and "${{" in DATABASE_URL) or not DATABASE_URL.strip():
+        _log.error(
+            "[startup] missing or invalid DATABASE_URL environment variable; application requires a Postgres DATABASE_URL (postgresql://...) to start"
+        )
+        # Exit with code 1 so the process terminates cleanly and the platform shows a concise reason.
+        sys.exit(1)
+
     pool = await asyncpg.create_pool(DATABASE_URL)
     app.state.pool = pool
     # Track last-checked timestamps for stable-video-id channels so we poll them less often
