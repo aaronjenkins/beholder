@@ -23,7 +23,7 @@ import asyncio
 import asyncpg
 import httpx
 
-DATABASE_URL = "postgresql://beholder:beholder@db:5432/beholder"
+DATABASE_URL = os.environ.get("DATABASE_URL", "${{ Postgres.DATABASE_URL }}")
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
 DRY_RUN = "--dry-run" in sys.argv
 

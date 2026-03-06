@@ -20,7 +20,7 @@ from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-DATABASE_URL     = os.environ.get("DATABASE_URL", "postgresql://beholder:beholder@db:5432/beholder")
+DATABASE_URL     = os.environ.get("DATABASE_URL", "${{ Postgres.DATABASE_URL }}")
 API_KEY          = os.environ.get("API_KEY")
 YT_KEY           = os.environ.get("YT_KEY", "")
 REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL", 1800))  # rotating streams poll interval (default 30 min)
