@@ -1,14 +1,17 @@
 """Beholder — live news stream aggregator"""
 import asyncio
 import collections
+import gzip
 import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
+import subprocess
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -31,6 +34,15 @@ ADMIN_PHONE_NUM   = os.environ.get("ADMIN_PHONE_NUM", "")
 ADMIN_SECRET      = os.environ.get("ADMIN_SECRET", secrets.token_hex(32))
 STYTCH_PROJECT_ID = os.environ.get("STYTCH_PROJECT_ID", "")
 STYTCH_SECRET     = os.environ.get("STYTCH_SECRET", "")
+
+# S3 backup config
+S3_BUCKET         = os.environ.get("S3_BUCKET", "")
+S3_REGION         = os.environ.get("S3_REGION", "us-east-1")
+S3_PREFIX         = os.environ.get("S3_PREFIX", "beholder/backups")
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+BACKUP_INTERVAL   = int(os.environ.get("BACKUP_INTERVAL", 86400))  # 24 hours
+BACKUP_RETAIN_DAYS = int(os.environ.get("BACKUP_RETAIN_DAYS", 30))
 
 def _stytch_base() -> str:
     return "https://test.stytch.com/v1" if "test" in STYTCH_PROJECT_ID else "https://api.stytch.com/v1"
@@ -352,6 +364,77 @@ _log_buffer = _LogBuffer()
 logging.getLogger().addHandler(_log_buffer)
 
 
+# ── S3 backup ───────────────────────────────────────────────────────────────────
+
+async def run_backup() -> dict:
+    """pg_dump → gzip → upload to S3. Returns a status dict."""
+    if not all([S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]):
+        return {"ok": False, "error": "S3 not configured (missing S3_BUCKET, AWS_ACCESS_KEY_ID, or AWS_SECRET_ACCESS_KEY)"}
+
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    key = f"{S3_PREFIX}/{ts}.sql.gz"
+
+    try:
+        # Run pg_dump in a thread so we don't block the event loop
+        def _dump_and_upload():
+            result = subprocess.run(
+                ["pg_dump", "--no-password", DATABASE_URL],
+                capture_output=True, timeout=300,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"pg_dump failed: {result.stderr.decode()[:500]}")
+
+            compressed = gzip.compress(result.stdout)
+
+            s3 = boto3.client(
+                "s3",
+                region_name=S3_REGION,
+                aws_access_key_id=AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            )
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=key,
+                Body=compressed,
+                ContentType="application/gzip",
+            )
+
+            # Prune backups older than BACKUP_RETAIN_DAYS
+            cutoff = time.time() - BACKUP_RETAIN_DAYS * 86400
+            paginator = s3.get_paginator("list_objects_v2")
+            to_delete = []
+            for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_PREFIX + "/"):
+                for obj in page.get("Contents", []):
+                    if obj["LastModified"].timestamp() < cutoff:
+                        to_delete.append({"Key": obj["Key"]})
+            if to_delete:
+                s3.delete_objects(Bucket=S3_BUCKET, Delete={"Objects": to_delete})
+
+            return len(compressed), len(to_delete)
+
+        size_bytes, pruned = await asyncio.get_event_loop().run_in_executor(None, _dump_and_upload)
+        _log.info("[backup] uploaded %s (%.1f KB), pruned %d old backups", key, size_bytes / 1024, pruned)
+        return {"ok": True, "key": key, "size_bytes": size_bytes, "pruned": pruned}
+
+    except (BotoCoreError, ClientError) as e:
+        _log.error("[backup] S3 error: %s", e)
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        _log.error("[backup] failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+
+async def backup_loop() -> None:
+    # Stagger first backup by 1 minute so startup isn't crowded
+    await asyncio.sleep(60)
+    while True:
+        await run_backup()
+        await asyncio.sleep(BACKUP_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if ADMIN_ENABLED:
@@ -368,8 +451,10 @@ async def lifespan(app: FastAPI):
     # Track last-checked timestamps for stable-video-id channels so we poll them less often
     app.state.stable_last_checked = {}
     task = asyncio.create_task(refresh_loop(pool))
+    backup_task = asyncio.create_task(backup_loop())
     yield
     task.cancel()
+    backup_task.cancel()
     await pool.close()
 
 
@@ -890,6 +975,12 @@ async def admin_rescrape_streams():
                     skipped += 1
 
     return {"ok": True, "updated": updated, "skipped": skipped}
+
+
+@app.post("/api/admin/backup", tags=["Admin"], dependencies=[Depends(require_admin)])
+async def admin_backup():
+    """Manually trigger a PostgreSQL → S3 backup."""
+    return await run_backup()
 
 
 @app.get("/api/admin/logs", tags=["Admin"], dependencies=[Depends(require_admin)])

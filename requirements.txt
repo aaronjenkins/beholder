@@ -2,3 +2,4 @@ httpx
 fastapi[standard]
 uvicorn
 asyncpg
+boto3
