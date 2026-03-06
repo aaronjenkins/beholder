@@ -1110,9 +1110,10 @@ async def refresh_status():
     }
 
 
-@app.get("/admin", include_in_schema=False)
-@app.get("/admin/{rest:path}", include_in_schema=False)
-async def spa_fallback():
-    return FileResponse("static/index.html")
+if os.environ.get("SERVE_STATIC", "true").lower() != "false":
+    @app.get("/admin", include_in_schema=False)
+    @app.get("/admin/{rest:path}", include_in_schema=False)
+    async def spa_fallback():
+        return FileResponse("static/index.html")
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+    app.mount("/", StaticFiles(directory="static", html=True), name="static")
