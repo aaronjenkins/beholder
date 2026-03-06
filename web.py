@@ -26,7 +26,9 @@ from pydantic import BaseModel
 
 DATABASE_URL     = os.environ.get("DATABASE_URL", "${{ Postgres.DATABASE_URL }}")
 API_KEY          = os.environ.get("API_KEY")
-YT_KEY           = os.environ.get("YT_KEY", "")
+_YT_KEY_LEGACY   = os.environ.get("YT_KEY", "")             # backwards-compat fallback
+YT_KEY_1         = os.environ.get("YT_KEY_1", _YT_KEY_LEGACY)  # rotating channels (30-min refresh)
+YT_KEY_2         = os.environ.get("YT_KEY_2", _YT_KEY_LEGACY)  # stable channels (6-hr refresh)
 REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL", 1800))  # rotating streams poll interval (default 30 min)
 STABLE_REFRESH_INTERVAL = int(os.environ.get("STABLE_REFRESH_INTERVAL", 21600))  # stable-video-id poll interval (default 6 hours)
 
@@ -44,8 +46,9 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 BACKUP_INTERVAL   = int(os.environ.get("BACKUP_INTERVAL", 86400))  # 24 hours
 BACKUP_RETAIN_DAYS = int(os.environ.get("BACKUP_RETAIN_DAYS", 30))
 
-# YouTube API quota block: set to future timestamp when key is blocked; scraping skips until then
-_yt_blocked_until: float = 0.0
+# Per-key quota block timestamps (epoch); scraping skips the relevant portion until they expire
+_yt_blocked_until_1: float = 0.0  # YT_KEY_1 — rotating channels
+_yt_blocked_until_2: float = 0.0  # YT_KEY_2 — stable channels
 YT_BLOCK_DURATION = 86400  # 24 hours
 
 def _stytch_base() -> str:
@@ -151,50 +154,49 @@ LIVE_TTL = max(int(REFRESH_INTERVAL * 1.5), 300)
 
 
 
-def _yt_quota_blocked(r) -> bool:
-    """Return True (and set the global block) if the response indicates a quota/key block."""
-    global _yt_blocked_until
+def _yt_quota_blocked(r, key_num: int) -> bool:
+    """Return True (and set the per-key block) if the response indicates a quota/key block."""
+    global _yt_blocked_until_1, _yt_blocked_until_2
     if r.status_code in (403, 429):
         try:
             reason = r.json().get("error", {}).get("errors", [{}])[0].get("reason", "")
         except Exception:
             reason = ""
         if r.status_code == 429 or reason in ("quotaExceeded", "dailyLimitExceeded", "keyInvalid", "forbidden"):
-            _yt_blocked_until = time.time() + YT_BLOCK_DURATION
+            blocked_until = time.time() + YT_BLOCK_DURATION
+            if key_num == 1:
+                _yt_blocked_until_1 = blocked_until
+            else:
+                _yt_blocked_until_2 = blocked_until
             _log.warning(
-                "[yt] API key blocked (reason=%r) — scraping paused for %dh until %s",
-                reason, YT_BLOCK_DURATION // 3600,
-                datetime.fromtimestamp(_yt_blocked_until, tz=timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+                "[yt] KEY_%d blocked (reason=%r) — paused for %dh until %s",
+                key_num, reason, YT_BLOCK_DURATION // 3600,
+                datetime.fromtimestamp(blocked_until, tz=timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
             )
             return True
     return False
 
 
-async def fetch_channel_video_ids(client: httpx.AsyncClient, channel_id: str) -> list[str]:
-    """Fetch the 15 most recent video IDs for a channel using YouTube Data API activities.list.
-    This replaces the previous RSS-based approach. If `YT_KEY` is not configured, returns an empty list.
-    Uses `activities.list?part=contentDetails&channelId=...` and extracts upload videoIds.
-    """
-    if not YT_KEY:
+async def fetch_channel_video_ids(client: httpx.AsyncClient, channel_id: str, key: str) -> list[str]:
+    """Fetch the 15 most recent video IDs for a channel via YouTube Data API activities.list."""
+    if not key:
         return []
     url = (
         f"https://www.googleapis.com/youtube/v3/activities"
-        f"?part=contentDetails&channelId={channel_id}&maxResults=15&key={YT_KEY}"
+        f"?part=contentDetails&channelId={channel_id}&maxResults=15&key={key}"
     )
     try:
         r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         if r.status_code != 200:
-            _yt_quota_blocked(r)
+            _yt_quota_blocked(r, 1)
             _log.warning("[fetch_channel_video_ids] non-200 for channel %s: %s", channel_id, r.status_code)
             return []
         items = r.json().get("items", [])
         vids: list[str] = []
         for it in items:
             cd = it.get("contentDetails", {})
-            # uploads
             if cd.get("upload") and cd["upload"].get("videoId"):
                 vids.append(cd["upload"]["videoId"])
-            # for completeness, check other possible fields
             elif cd.get("videoId"):
                 vids.append(cd.get("videoId"))
         _log.debug("[fetch_channel_video_ids] channel %s -> %d vids", channel_id, len(vids))
@@ -204,31 +206,31 @@ async def fetch_channel_video_ids(client: httpx.AsyncClient, channel_id: str) ->
         return []
 
 
-async def batch_check_live(client: httpx.AsyncClient, video_ids: list[str]) -> set[str]:
+async def batch_check_live(client: httpx.AsyncClient, video_ids: list[str], key: str, key_num: int) -> set[str]:
     """Return the set of video IDs that are currently live.
     Batches 50 IDs per videos.list call (1 quota unit per batch)."""
-    if not YT_KEY or not video_ids:
+    if not key or not video_ids:
         return set()
     live: set[str] = set()
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i:i + 50]
         url = (
             f"https://www.googleapis.com/youtube/v3/videos"
-            f"?part=snippet&id={','.join(batch)}&key={YT_KEY}"
+            f"?part=snippet&id={','.join(batch)}&key={key}"
             f"&fields=items(id,snippet/liveBroadcastContent)"
         )
         try:
-            _log.debug("[batch_check_live] checking batch size=%d", len(batch))
+            _log.debug("[batch_check_live] KEY_%d checking batch size=%d", key_num, len(batch))
             r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code != 200:
-                _yt_quota_blocked(r)
-                _log.warning("[batch_check_live] videos.list returned %s for batch starting %s", r.status_code, batch[0])
+                _yt_quota_blocked(r, key_num)
+                _log.warning("[batch_check_live] KEY_%d videos.list returned %s", key_num, r.status_code)
                 break
             for item in r.json().get("items", []):
                 if item.get("snippet", {}).get("liveBroadcastContent") == "live":
                     live.add(item["id"])
         except Exception:
-            _log.exception("[batch_check_live] error checking videos: %s", batch[:3])
+            _log.exception("[batch_check_live] KEY_%d error checking videos: %s", key_num, batch[:3])
     return live
 
 
@@ -236,9 +238,16 @@ async def batch_check_live(client: httpx.AsyncClient, video_ids: list[str]) -> s
 async def refresh_loop(pool: asyncpg.Pool) -> None:
     await asyncio.sleep(5)
     while True:
-        if _yt_blocked_until and time.time() < _yt_blocked_until:
-            remaining = int(_yt_blocked_until - time.time())
-            _log.info("[refresh] skipping — YouTube API blocked for another %dm", remaining // 60)
+        now = time.time()
+        key1_ok = not (_yt_blocked_until_1 and now < _yt_blocked_until_1)
+        key2_ok = not (_yt_blocked_until_2 and now < _yt_blocked_until_2)
+        if not key1_ok:
+            _log.info("[refresh] KEY_1 blocked for another %dm — skipping rotating channels",
+                      int(_yt_blocked_until_1 - now) // 60)
+        if not key2_ok:
+            _log.info("[refresh] KEY_2 blocked for another %dm — skipping stable channels",
+                      int(_yt_blocked_until_2 - now) // 60)
+        if not key1_ok and not key2_ok:
             await asyncio.sleep(REFRESH_INTERVAL)
             continue
         try:
@@ -273,54 +282,63 @@ async def refresh_loop(pool: asyncpg.Pool) -> None:
             stable_rows   = [r for r in rows if r["stable_video_id"]]
             rotating_rows = [r for r in rows if not r["stable_video_id"]]
 
-            # current time used for scheduling stable checks
             now = time.time()
 
             async with httpx.AsyncClient(timeout=15) as client:
                 channel_videos: dict[str, list[str]] = {}
-                all_video_ids: list[str] = []
+                stable_vids:   list[str] = []
+                rotating_vids: list[str] = []
                 seen: set[str] = set()
+                checked_tags: set[str] = set()
 
-                # Stable channels: only poll these every STABLE_REFRESH_INTERVAL
+                # Stable channels (KEY_2) — only when key2 is available
                 stable_last_checked: dict = getattr(app.state, "stable_last_checked", {})
-                for row in stable_rows:
-                    tag = row["tag"]
-                    vid = row["video_id"]
-                    last = stable_last_checked.get(tag, 0)
-                    # include in this run only if we have a vid and it's due for a check
-                    if vid and (now - last >= STABLE_REFRESH_INTERVAL):
-                        channel_videos[tag] = [vid]
-                        if vid not in seen:
-                            seen.add(vid)
-                            all_video_ids.append(vid)
-                        stable_last_checked[tag] = now
-                    else:
-                        channel_videos[tag] = [vid] if vid else []
-                # log which stable channels we included vs skipped
-                included = [r['tag'] for r in stable_rows if r['video_id'] and (now - stable_last_checked.get(r['tag'], 0) < 1e-6)]
-                skipped = [r['tag'] for r in stable_rows if r['video_id'] and (now - stable_last_checked.get(r['tag'], 0) >= STABLE_REFRESH_INTERVAL)]
-                _log.info("[refresh] stable included=%d skipped=%d", len(included), len(skipped))
+                if key2_ok:
+                    for row in stable_rows:
+                        tag = row["tag"]
+                        vid = row["video_id"]
+                        last = stable_last_checked.get(tag, 0)
+                        if vid and (now - last >= STABLE_REFRESH_INTERVAL):
+                            channel_videos[tag] = [vid]
+                            if vid not in seen:
+                                seen.add(vid)
+                                stable_vids.append(vid)
+                            stable_last_checked[tag] = now
+                            checked_tags.add(tag)
+                        else:
+                            channel_videos[tag] = [vid] if vid else []
+                    included = [r['tag'] for r in stable_rows if r['video_id'] and (now - stable_last_checked.get(r['tag'], 0) < 1e-6)]
+                    skipped  = [r['tag'] for r in stable_rows if r['video_id'] and (now - stable_last_checked.get(r['tag'], 0) >= STABLE_REFRESH_INTERVAL)]
+                    _log.info("[refresh] stable KEY_2 included=%d skipped=%d", len(included), len(skipped))
 
-                # Rotating channels: use YouTube Data API activities.list (replaces RSS)
-                rss_results = await asyncio.gather(
-                    *[fetch_channel_video_ids(client, r["channel_id"]) for r in rotating_rows],
-                    return_exceptions=True,
-                )
-                for row, result in zip(rotating_rows, rss_results):
-                    vids = result if isinstance(result, list) else []
-                    channel_videos[row["tag"]] = vids
-                    for vid in vids:
-                        if vid not in seen:
-                            seen.add(vid)
-                            all_video_ids.append(vid)
+                # Rotating channels (KEY_1) — only when key1 is available
+                if key1_ok:
+                    rss_results = await asyncio.gather(
+                        *[fetch_channel_video_ids(client, r["channel_id"], YT_KEY_1) for r in rotating_rows],
+                        return_exceptions=True,
+                    )
+                    for row, result in zip(rotating_rows, rss_results):
+                        vids = result if isinstance(result, list) else []
+                        channel_videos[row["tag"]] = vids
+                        for vid in vids:
+                            if vid not in seen:
+                                seen.add(vid)
+                                rotating_vids.append(vid)
+                        checked_tags.add(row["tag"])
 
-                # Single batched API call to find which videos are live
-                live_ids = await batch_check_live(client, all_video_ids)
+                # Batch live-checks using the appropriate key per channel type
+                live_ids: set[str] = set()
+                if key2_ok and stable_vids:
+                    live_ids |= await batch_check_live(client, stable_vids, YT_KEY_2, 2)
+                if key1_ok and rotating_vids:
+                    live_ids |= await batch_check_live(client, rotating_vids, YT_KEY_1, 1)
 
                 now = time.time()
                 async with pool.acquire() as conn:
                     for row in rows:
                         tag = row["tag"]
+                        if tag not in checked_tags:
+                            continue  # key for this channel type is blocked — don't touch DB
                         vids = channel_videos.get(tag, [])
                         live_vid = next((v for v in vids if v in live_ids), None)
 
@@ -355,8 +373,8 @@ async def refresh_loop(pool: asyncpg.Pool) -> None:
                     except Exception:
                         pass
             _log.info(
-                "[refresh] done — %d live, %d channels checked, %d unique videos tested",
-                len(live_ids), len(rows), len(all_video_ids),
+                "[refresh] done — %d live, %d checked, %d stable vids, %d rotating vids",
+                len(live_ids), len(checked_tags), len(stable_vids), len(rotating_vids),
             )
             try:
                 app.state.last_refresh = time.time()
@@ -895,13 +913,13 @@ async def admin_lookup_stream(body: dict):
     handle = body.get("handle", "").strip().lstrip("@")
     if not handle:
         raise HTTPException(status_code=400, detail="Handle required")
-    if not YT_KEY:
-        raise HTTPException(status_code=503, detail="YT_KEY not configured — cannot look up channel")
+    if not YT_KEY_1:
+        raise HTTPException(status_code=503, detail="YT_KEY_1 not configured — cannot look up channel")
 
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
             f"https://www.googleapis.com/youtube/v3/channels"
-            f"?part=snippet&forHandle=@{handle}&key={YT_KEY}"
+            f"?part=snippet&forHandle=@{handle}&key={YT_KEY_1}"
         )
     items = r.json().get("items", [])
     if not items:
@@ -994,20 +1012,21 @@ async def admin_rescrape_streams():
 
     async with httpx.AsyncClient(timeout=30) as client:
         channel_videos: dict[str, list[str]] = {}
-        all_video_ids: list[str] = []
+        stable_vids:   list[str] = []
+        rotating_vids: list[str] = []
         seen: set[str] = set()
 
-        # Stable: check existing video_id directly
+        # Stable: check existing video_id directly (KEY_2)
         for row in stable_rows:
             vid = row["video_id"]
             channel_videos[row["tag"]] = [vid] if vid else []
             if vid and vid not in seen:
                 seen.add(vid)
-                all_video_ids.append(vid)
+                stable_vids.append(vid)
 
-        # Rotating: RSS to find recent candidates
+        # Rotating: activities.list to find recent candidates (KEY_1)
         rss_results = await asyncio.gather(
-            *[fetch_channel_video_ids(client, r["channel_id"]) for r in rotating_rows],
+            *[fetch_channel_video_ids(client, r["channel_id"], YT_KEY_1) for r in rotating_rows],
             return_exceptions=True,
         )
         for row, result in zip(rotating_rows, rss_results):
@@ -1016,9 +1035,13 @@ async def admin_rescrape_streams():
             for vid in vids:
                 if vid not in seen:
                     seen.add(vid)
-                    all_video_ids.append(vid)
+                    rotating_vids.append(vid)
 
-        live_ids = await batch_check_live(client, all_video_ids)
+        live_ids: set[str] = set()
+        if stable_vids:
+            live_ids |= await batch_check_live(client, stable_vids, YT_KEY_2, 2)
+        if rotating_vids:
+            live_ids |= await batch_check_live(client, rotating_vids, YT_KEY_1, 1)
 
         now = time.time()
         updated = 0
@@ -1057,7 +1080,10 @@ from fastapi.responses import FileResponse
 async def refresh_status():
     """Public endpoint reporting last refresh timestamp and interval (seconds)."""
     last = getattr(app.state, 'last_refresh', None)
-    blocked = _yt_blocked_until if _yt_blocked_until and time.time() < _yt_blocked_until else None
+    now = time.time()
+    b1 = _yt_blocked_until_1 if _yt_blocked_until_1 and now < _yt_blocked_until_1 else None
+    b2 = _yt_blocked_until_2 if _yt_blocked_until_2 and now < _yt_blocked_until_2 else None
+    blocked = max(b for b in [b1, b2] if b) if (b1 or b2) else None
     return {
         "last_refresh": last,
         "interval": REFRESH_INTERVAL,

@@ -26,6 +26,8 @@ services:
       - DATABASE_URL=postgresql://beholder:beholder@db:5432/beholder
       - API_KEY=${API_KEY}
       - YT_KEY=${YT_KEY}
+      - YT_KEY_1=${YT_KEY_1:-${YT_KEY}}
+      - YT_KEY_2=${YT_KEY_2:-${YT_KEY}}
       - REFRESH_INTERVAL=900
       - ADMIN_PHONE_NUM=${ADMIN_PHONE_NUM}
       - ADMIN_SECRET=${ADMIN_SECRET}

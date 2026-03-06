@@ -127,8 +127,9 @@ export default function LiveStreams({ onBreakMode, onLiveCount, ytBlockedUntil }
         const live = data.filter(s => s.embed_url)
         setStreams(live)
         setAllStreams(data)
-        setWatchList(prev => Object.fromEntries(Object.entries(prev).filter(([tag]) => live.some(s => s.tag === tag))))
-        setActiveOrder(prev => prev.filter(tag => live.some(s => s.tag === tag)))
+        // only prune tags that no longer exist in the full stream list, not just offline ones
+        setWatchList(prev => Object.fromEntries(Object.entries(prev).filter(([tag]) => data.some(s => s.tag === tag))))
+        setActiveOrder(prev => prev.filter(tag => data.some(s => s.tag === tag)))
       })
       .catch(() => {})
   }
