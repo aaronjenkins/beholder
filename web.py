@@ -543,6 +543,34 @@ async def get_streams():
     return out
 
 
+@app.get(
+    "/api/streams/last_live",
+    response_model=list[StreamOut],
+    tags=["Streams"],
+    summary="Last known live streams",
+    description="Returns all streams that have a stored video_id, using it as the embed URL regardless of current live status.",
+)
+async def get_last_live_streams():
+    async with app.state.pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM streams WHERE video_id IS NOT NULL ORDER BY id")
+    out = []
+    for r in rows:
+        last_ts = (r["last_live_at"].timestamp() if r["last_live_at"] else None)
+        out.append(StreamOut(
+            name=r["name"], tag=r["tag"], color=r["color"],
+            embed_url=build_embed_url(r),
+            video_id=r.get("video_id"),
+            last_live_at=last_ts,
+            is_live=False,
+            link=r["link"],
+            region=r["region"], subregion=r["subregion"],
+            bias_label=r["bias_label"], bias_color=r["bias_color"], bias_title=r["bias_title"],
+            government_funded=r["government_funded"],
+            icon_url=r["icon_url"],
+        ))
+    return out
+
+
 @app.post(
     "/api/streams",
     response_model=StreamOut,

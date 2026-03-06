@@ -39,7 +39,7 @@ function calcLayout(n, w, h) {
 // Using simple static grid cells (no reordering)
 
 
-export default function LiveStreams({ onBreakMode, onLiveCount }) {
+export default function LiveStreams({ onBreakMode, onLiveCount, ytBlockedUntil }) {
     // Track menu visibility for desktop
     const [menuVisible, setMenuVisible] = useState(true)
   const [streams, setStreams] = useState([])
@@ -120,7 +120,8 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
   // no drag-and-drop sensors — static grid
 
   function fetchStreams() {
-    fetch('/api/streams')
+    const url = ytBlockedUntil ? '/api/streams/last_live' : '/api/streams'
+    fetch(url)
       .then(r => r.json())
       .then(data => {
         const live = data.filter(s => s.embed_url)
@@ -138,7 +139,7 @@ export default function LiveStreams({ onBreakMode, onLiveCount }) {
     // without requiring a manual page refresh
     const interval = setInterval(fetchStreams, 90_000)
     return () => clearInterval(interval)
-  }, [])
+  }, [ytBlockedUntil])
 
   useEffect(() => {
     if (!gridRef.current) return

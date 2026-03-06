@@ -47,7 +47,7 @@ function MainApp() {
           {new Date(ytBlockedUntil * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} tomorrow.
         </div>
       )}
-      <LiveStreams onBreakMode={setBreakMode} onLiveCount={setLiveCount} />
+      <LiveStreams onBreakMode={setBreakMode} onLiveCount={setLiveCount} ytBlockedUntil={ytBlockedUntil} />
       {!breakMode && <NewsTicker />}
       {!breakMode && <StockTicker />}
     </div>
