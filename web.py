@@ -451,10 +451,15 @@ async def lifespan(app: FastAPI):
     # Track last-checked timestamps for stable-video-id channels so we poll them less often
     app.state.stable_last_checked = {}
     task = asyncio.create_task(refresh_loop(pool))
-    backup_task = asyncio.create_task(backup_loop())
+    if all([S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]):
+        backup_task = asyncio.create_task(backup_loop())
+    else:
+        backup_task = None
+        _log.warning("[backup] S3 not configured — set S3_BUCKET, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY to enable daily backups")
     yield
     task.cancel()
-    backup_task.cancel()
+    if backup_task:
+        backup_task.cancel()
     await pool.close()
 
 
