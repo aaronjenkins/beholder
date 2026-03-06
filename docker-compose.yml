@@ -23,7 +23,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - DATABASE_URL=${{ Postgres.DATABASE_URL }}
+      - DATABASE_URL=postgresql://beholder:beholder@db:5432/beholder
       - API_KEY=${API_KEY}
       - YT_KEY=${YT_KEY}
       - REFRESH_INTERVAL=900
