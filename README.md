@@ -36,7 +36,7 @@ Live global news stream aggregator. Watch up to 60+ simultaneous YouTube live st
 
 ## Channels
 
-Bias ratings based on [AllSides](https://www.allsides.com/media-bias/ratings) and [Ad Fontes Media](https://adfontesmedia.com/).
+Bias ratings sourced from [AllSides](https://www.allsides.com/media-bias/ratings) via the [favstats/AllSideR](https://github.com/favstats/AllSideR) dataset, supplemented by [Ad Fontes Media](https://adfontesmedia.com/) and manual research for sources not covered by AllSides.
 
 | Tag | Network | Region | Bias |
 |-----|---------|--------|------|
