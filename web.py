@@ -1029,7 +1029,13 @@ from fastapi.responses import FileResponse
 async def refresh_status():
     """Public endpoint reporting last refresh timestamp and interval (seconds)."""
     last = getattr(app.state, 'last_refresh', None)
-    return {"last_refresh": last, "interval": REFRESH_INTERVAL, "stable_interval": STABLE_REFRESH_INTERVAL}
+    blocked = _yt_blocked_until if _yt_blocked_until and time.time() < _yt_blocked_until else None
+    return {
+        "last_refresh": last,
+        "interval": REFRESH_INTERVAL,
+        "stable_interval": STABLE_REFRESH_INTERVAL,
+        "yt_blocked_until": blocked,
+    }
 
 
 @app.get("/admin", include_in_schema=False)
