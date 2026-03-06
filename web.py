@@ -1120,9 +1120,15 @@ async def refresh_status():
 
 
 if os.environ.get("SERVE_STATIC", "true").lower() != "false":
-    @app.get("/admin", include_in_schema=False)
-    @app.get("/admin/{rest:path}", include_in_schema=False)
-    async def spa_fallback():
-        return FileResponse("static/index.html")
+    # Only mount static files and register the SPA fallback if the `static` directory
+    # and `static/index.html` actually exist. In some deploys (e.g., API-only), the
+    # frontend build may not be present and mounting would raise a RuntimeError.
+    if os.path.isdir("static") and os.path.isfile(os.path.join("static", "index.html")):
+        # Keep the SPA fallback implementation here for future use, but do not
+        # register the `/admin` routes so the admin frontend is not exposed.
+        async def _spa_fallback_unmounted(rest: str = ""):
+            return FileResponse("static/index.html")
 
-    app.mount("/", StaticFiles(directory="static", html=True), name="static")
+        app.mount("/", StaticFiles(directory="static", html=True), name="static")
+    else:
+        _log.warning("[startup] static directory or static/index.html not found; skipping static file mounting")
