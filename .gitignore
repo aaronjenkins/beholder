@@ -7,8 +7,6 @@ __pycache__/
 *.pyo
 *.db
 
-# Frontend build output
-static/
 
 # Node
 frontend/node_modules/
