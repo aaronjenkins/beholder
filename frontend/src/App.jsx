@@ -44,7 +44,7 @@ function MainApp() {
       {ytBlockedUntil && (
         <div className="yt-block-banner">
           Stream URLs may be out of date — showing last known live streams. Resumes at{' '}
-          {new Date(ytBlockedUntil * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.
+          {new Date(ytBlockedUntil * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} tomorrow.
         </div>
       )}
       <LiveStreams onBreakMode={setBreakMode} onLiveCount={setLiveCount} />
