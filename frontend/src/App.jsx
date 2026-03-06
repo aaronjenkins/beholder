@@ -43,7 +43,7 @@ function MainApp() {
       <Header onHelpClick={handleHelpClick} liveCount={liveCount} />
       {ytBlockedUntil && (
         <div className="yt-block-banner">
-          Stream URLs may be out of date — showing last known live streams. Scraping resumes at{' '}
+          Stream URLs may be out of date — showing last known live streams. Resumes at{' '}
           {new Date(ytBlockedUntil * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.
         </div>
       )}
