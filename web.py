@@ -44,6 +44,10 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 BACKUP_INTERVAL   = int(os.environ.get("BACKUP_INTERVAL", 86400))  # 24 hours
 BACKUP_RETAIN_DAYS = int(os.environ.get("BACKUP_RETAIN_DAYS", 30))
 
+# YouTube API quota block: set to future timestamp when key is blocked; scraping skips until then
+_yt_blocked_until: float = 0.0
+YT_BLOCK_DURATION = 86400  # 24 hours
+
 def _stytch_base() -> str:
     return "https://test.stytch.com/v1" if "test" in STYTCH_PROJECT_ID else "https://api.stytch.com/v1"
 
@@ -147,6 +151,25 @@ LIVE_TTL = max(int(REFRESH_INTERVAL * 1.5), 300)
 
 
 
+def _yt_quota_blocked(r) -> bool:
+    """Return True (and set the global block) if the response indicates a quota/key block."""
+    global _yt_blocked_until
+    if r.status_code in (403, 429):
+        try:
+            reason = r.json().get("error", {}).get("errors", [{}])[0].get("reason", "")
+        except Exception:
+            reason = ""
+        if r.status_code == 429 or reason in ("quotaExceeded", "dailyLimitExceeded", "keyInvalid", "forbidden"):
+            _yt_blocked_until = time.time() + YT_BLOCK_DURATION
+            _log.warning(
+                "[yt] API key blocked (reason=%r) — scraping paused for %dh until %s",
+                reason, YT_BLOCK_DURATION // 3600,
+                datetime.fromtimestamp(_yt_blocked_until, tz=timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+            )
+            return True
+    return False
+
+
 async def fetch_channel_video_ids(client: httpx.AsyncClient, channel_id: str) -> list[str]:
     """Fetch the 15 most recent video IDs for a channel using YouTube Data API activities.list.
     This replaces the previous RSS-based approach. If `YT_KEY` is not configured, returns an empty list.
@@ -161,6 +184,7 @@ async def fetch_channel_video_ids(client: httpx.AsyncClient, channel_id: str) ->
     try:
         r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         if r.status_code != 200:
+            _yt_quota_blocked(r)
             _log.warning("[fetch_channel_video_ids] non-200 for channel %s: %s", channel_id, r.status_code)
             return []
         items = r.json().get("items", [])
@@ -197,8 +221,9 @@ async def batch_check_live(client: httpx.AsyncClient, video_ids: list[str]) -> s
             _log.debug("[batch_check_live] checking batch size=%d", len(batch))
             r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code != 200:
+                _yt_quota_blocked(r)
                 _log.warning("[batch_check_live] videos.list returned %s for batch starting %s", r.status_code, batch[0])
-                continue
+                break
             for item in r.json().get("items", []):
                 if item.get("snippet", {}).get("liveBroadcastContent") == "live":
                     live.add(item["id"])
@@ -211,6 +236,11 @@ async def batch_check_live(client: httpx.AsyncClient, video_ids: list[str]) -> s
 async def refresh_loop(pool: asyncpg.Pool) -> None:
     await asyncio.sleep(5)
     while True:
+        if _yt_blocked_until and time.time() < _yt_blocked_until:
+            remaining = int(_yt_blocked_until - time.time())
+            _log.info("[refresh] skipping — YouTube API blocked for another %dm", remaining // 60)
+            await asyncio.sleep(REFRESH_INTERVAL)
+            continue
         try:
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
