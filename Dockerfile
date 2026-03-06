@@ -11,4 +11,4 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY web.py .
 COPY --from=frontend-builder /app/static ./static/
-CMD ["uvicorn", "web:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["sh", "-c", "uvicorn web:app --host 0.0.0.0 --port ${PORT:-8001}"]
