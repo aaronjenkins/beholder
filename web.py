@@ -16,6 +16,7 @@ from typing import Optional
 import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -377,6 +378,15 @@ app = FastAPI(
     description="Live news stream aggregator — streams and headlines API.",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
