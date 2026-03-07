@@ -6,5 +6,8 @@ const apiTarget = process.env.VITE_API_URL || 'https://beholder-production.up.ra
 export default defineConfig({
   plugins: [react()],
   build: { outDir: 'dist', emptyOutDir: true },
-  server: { proxy: { '/api': { target: apiTarget, changeOrigin: true } } },
+  server: {
+    allowedHosts: ['beholder.aaronjenkins.net', 'localhost'],
+    proxy: { '/api': { target: apiTarget, changeOrigin: true } }
+  },
 })
