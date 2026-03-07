@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { apiFetch } from '../api.js'
 import { MdOutlineAdminPanelSettings, MdAttachMoney } from 'react-icons/md'
 import { RiLifebuoyLine } from 'react-icons/ri'
 
@@ -41,7 +42,7 @@ export default function Header({ onHelpClick, liveCount }) {
   // fetch refresh status once on mount
   useEffect(() => {
     let mounted = true
-    fetch('/api/refresh_status').then(r => r.json()).then(js => { if (mounted) setStatus(js) }).catch(() => {})
+    apiFetch('/api/refresh_status').then(r => r.json()).then(js => { if (mounted) setStatus(js) }).catch(() => {})
     return () => { mounted = false }
   }, [])
 

@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: beholder-api
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql://beholder:beholder@db:5432/beholder
+      - API_KEY=${API_KEY}
+      - REFRESH_INTERVAL=900
+      - ADMIN_PHONE_NUM=${ADMIN_PHONE_NUM}
+      - ADMIN_SECRET=${ADMIN_SECRET}
+      - STYTCH_PROJECT_ID=${STYTCH_PROJECT_ID}
+      - STYTCH_SECRET=${STYTCH_SECRET}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

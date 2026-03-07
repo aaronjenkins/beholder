@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import Header from './components/Header.jsx'
+import { apiFetch } from './api.js'
 import LiveStreams from './components/LiveStreams.jsx'
 import NewsTicker from './components/NewsTicker.jsx'
 import StockTicker from './components/StockTicker.jsx'
@@ -23,7 +24,7 @@ function MainApp() {
 
   useEffect(() => {
     function check() {
-      fetch('/api/refresh_status').then(r => r.json()).then(js => {
+      apiFetch('/api/refresh_status').then(r => r.json()).then(js => {
         setYtBlockedUntil(js.yt_blocked_until || null)
       }).catch(() => {})
     }

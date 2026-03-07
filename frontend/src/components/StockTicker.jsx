@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { apiFetch } from '../api.js'
 
 const DISPLAY = {
   '^GSPC': 'S&P 500', '^DJI': 'DOW', '^IXIC': 'NASDAQ', '^RUT': 'RUSSELL', '^VIX': 'VIX',
@@ -56,7 +57,7 @@ export default function StockTicker() {
 
   async function fetchQuotes() {
     try {
-      const r = await fetch('/api/stocks')
+      const r = await apiFetch('/api/stocks')
       const data = await r.json()
       if (data.length) setQuotes(data)
     } catch {}

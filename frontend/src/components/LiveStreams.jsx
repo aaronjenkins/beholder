@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
+import { apiFetch } from '../api.js'
 // using raw iframe embeds instead of ReactPlayer / react-youtube
 import { TbDeviceTv } from 'react-icons/tb'
 import { LuBrain } from 'react-icons/lu'
@@ -121,7 +122,7 @@ export default function LiveStreams({ onBreakMode, onLiveCount, ytBlockedUntil }
 
   function fetchStreams() {
     const url = ytBlockedUntil ? '/api/streams/last_live' : '/api/streams'
-    fetch(url)
+    apiFetch(url)
       .then(r => r.json())
       .then(data => {
         const live = data.filter(s => s.embed_url)

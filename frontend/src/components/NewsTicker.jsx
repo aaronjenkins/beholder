@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { apiFetch } from '../api.js'
 
 // Bias ratings based on AllSides Media Bias Ratings & Ad Fontes Media
 // Scale: L (Left), LL (Lean Left), C (Center), LR (Lean Right), R (Right)
@@ -50,7 +51,7 @@ export default function NewsTicker() {
 
   async function fetchNews() {
     try {
-      const r = await fetch('/api/news')
+      const r = await apiFetch('/api/news')
       const data = await r.json()
       if (data.length) setItems(data)
     } catch {}

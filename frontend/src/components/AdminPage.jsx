@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { apiFetch } from '../api.js'
 
 const REGIONS = [
   '', 'US', 'US Regional', 'Europe', 'Middle East', 'India', 'Pakistan',
@@ -33,7 +34,7 @@ const COLS = [
 ]
 
 function authFetch(url, opts, token) {
-  return fetch(url, {
+  return apiFetch(url, {
     ...opts,
     headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token, ...(opts?.headers || {}) },
   })
@@ -49,7 +50,7 @@ function PhasePhone({ onSent }) {
   async function send() {
     setLoading(true); setError('')
     try {
-      const res = await fetch('/api/admin/send-otp', {
+      const res = await apiFetch('/api/admin/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone }),
@@ -95,7 +96,7 @@ function PhaseOtp({ phone, methodId, onVerified, onBack }) {
   async function verify() {
     setLoading(true); setError('')
     try {
-      const res = await fetch('/api/admin/verify-otp', {
+      const res = await apiFetch('/api/admin/verify-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ method_id: methodId, code }),
@@ -243,7 +244,7 @@ function AddModal({ token, onClose, onCreated }) {
   async function lookup() {
     setLoading(true); setError('')
     try {
-      const res = await fetch('/api/admin/streams/lookup', {
+      const res = await apiFetch('/api/admin/streams/lookup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ handle }),
