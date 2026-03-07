@@ -527,7 +527,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",") if o.strip()]
+# Build allowed CORS origins list. Priority:
+# 1. `CORS_ORIGINS` env var (comma-separated)
+# 2. If not set, default to localhost dev origins and include `VITE_API_BASE` origin when present
+cors_env = os.environ.get("CORS_ORIGINS", "").strip()
+vite_base = os.environ.get("VITE_API_BASE", "").strip()
+if cors_env:
+    CORS_ORIGINS = [o.strip() for o in cors_env.split(",") if o.strip()]
+else:
+    # default local dev origins
+    CORS_ORIGINS = ["http://localhost:5173", "http://localhost:5174"]
+    # If a Vite-built frontend base URL is provided (e.g. https://beholder.aaronjenkins.net),
+    # include its origin so Pages/hosted UI can access the API without editing platform envs.
+    if vite_base:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(vite_base)
+            if parsed.scheme and parsed.netloc:
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                if origin not in CORS_ORIGINS:
+                    CORS_ORIGINS.append(origin)
+        except Exception:
+            # ignore parse errors and proceed with defaults
+            pass
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
