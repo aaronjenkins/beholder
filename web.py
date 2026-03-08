@@ -30,6 +30,8 @@ API_KEY          = os.environ.get("API_KEY")
 _YT_KEY_LEGACY   = os.environ.get("YT_KEY", "")             # backwards-compat fallback
 YT_KEY_1         = os.environ.get("YT_KEY_1", _YT_KEY_LEGACY)  # rotating channels (30-min refresh)
 YT_KEY_2         = os.environ.get("YT_KEY_2", _YT_KEY_LEGACY)  # stable channels (6-hr refresh)
+YT_KEY_3         = os.environ.get("YT_KEY_3", "")
+YT_KEY_4         = os.environ.get("YT_KEY_4", "")
 REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL", 1800))  # rotating streams poll interval (default 30 min)
 STABLE_REFRESH_INTERVAL = int(os.environ.get("STABLE_REFRESH_INTERVAL", 21600))  # stable-video-id poll interval (default 6 hours)
 
@@ -48,8 +50,10 @@ BACKUP_INTERVAL   = int(os.environ.get("BACKUP_INTERVAL", 86400))  # 24 hours
 BACKUP_RETAIN_DAYS = int(os.environ.get("BACKUP_RETAIN_DAYS", 30))
 
 # Per-key quota block timestamps (epoch); scraping skips the relevant portion until they expire
-_yt_blocked_until_1: float = 0.0  # YT_KEY_1 — rotating channels
-_yt_blocked_until_2: float = 0.0  # YT_KEY_2 — stable channels
+_yt_blocked_until_1: float = 0.0  # YT_KEY_1
+_yt_blocked_until_2: float = 0.0  # YT_KEY_2
+_yt_blocked_until_3: float = 0.0  # YT_KEY_3
+_yt_blocked_until_4: float = 0.0  # YT_KEY_4
 YT_BLOCK_DURATION = 86400  # 24 hours
 
 def _stytch_base() -> str:
@@ -157,7 +161,7 @@ LIVE_TTL = max(int(REFRESH_INTERVAL * 1.5), 300)
 
 def _yt_quota_blocked(r, key_num: int) -> bool:
     """Return True (and set the per-key block) if the response indicates a quota/key block."""
-    global _yt_blocked_until_1, _yt_blocked_until_2
+    global _yt_blocked_until_1, _yt_blocked_until_2, _yt_blocked_until_3, _yt_blocked_until_4
     if r.status_code in (403, 429):
         try:
             reason = r.json().get("error", {}).get("errors", [{}])[0].get("reason", "")
@@ -167,8 +171,12 @@ def _yt_quota_blocked(r, key_num: int) -> bool:
             blocked_until = time.time() + YT_BLOCK_DURATION
             if key_num == 1:
                 _yt_blocked_until_1 = blocked_until
-            else:
+            elif key_num == 2:
                 _yt_blocked_until_2 = blocked_until
+            elif key_num == 3:
+                _yt_blocked_until_3 = blocked_until
+            elif key_num == 4:
+                _yt_blocked_until_4 = blocked_until
             _log.warning(
                 "[yt] KEY_%d blocked (reason=%r) — paused for %dh until %s",
                 key_num, reason, YT_BLOCK_DURATION // 3600,
@@ -179,7 +187,10 @@ def _yt_quota_blocked(r, key_num: int) -> bool:
 
 
 async def fetch_channel_video_ids(client: httpx.AsyncClient, channel_id: str, key: str) -> list[str]:
-    """Fetch the 15 most recent video IDs for a channel via YouTube Data API activities.list."""
+    """Fetch the 15 most recent video IDs for a channel via YouTube Data API activities.list.
+    `key` may be empty to indicate skipping. This function now expects the caller to supply
+    the key number via `key_num` so quota-blocks can be attributed correctly.
+    """
     if not key:
         return []
     url = (
@@ -189,7 +200,12 @@ async def fetch_channel_video_ids(client: httpx.AsyncClient, channel_id: str, ke
     try:
         r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         if r.status_code != 200:
-            _yt_quota_blocked(r, 1)
+            # Caller should have provided a key_num via context; best-effort set to 1 if not supplied
+            try:
+                key_num = getattr(client, '_last_key_num', 1)
+            except Exception:
+                key_num = 1
+            _yt_quota_blocked(r, key_num)
             _log.warning("[fetch_channel_video_ids] non-200 for channel %s: %s", channel_id, r.status_code)
             return []
         items = r.json().get("items", [])
@@ -233,6 +249,43 @@ async def batch_check_live(client: httpx.AsyncClient, video_ids: list[str], key:
         except Exception:
             _log.exception("[batch_check_live] KEY_%d error checking videos: %s", key_num, batch[:3])
     return live
+
+
+async def next_yt_key_num() -> tuple[str, int]:
+    """Round-robin selector for available YouTube API keys.
+    Returns (key, key_num) where key_num is 1-based index. If no unblocked key is available,
+    returns ('', 0).
+    """
+    keys = getattr(app.state, 'yt_keys', [])
+    if not keys:
+        return '', 0
+    lock = getattr(app.state, 'yt_key_lock', None)
+    if lock is None:
+        app.state.yt_key_lock = asyncio.Lock()
+        lock = app.state.yt_key_lock
+    now = time.time()
+    async with lock:
+        idx = getattr(app.state, 'yt_key_index', 0)
+        n = len(keys)
+        for _ in range(n):
+            i = idx % n
+            key = keys[i]
+            key_num = i + 1
+            blocked = False
+            if key_num == 1 and _yt_blocked_until_1 and now < _yt_blocked_until_1:
+                blocked = True
+            if key_num == 2 and _yt_blocked_until_2 and now < _yt_blocked_until_2:
+                blocked = True
+            if key_num == 3 and _yt_blocked_until_3 and now < _yt_blocked_until_3:
+                blocked = True
+            if key_num == 4 and _yt_blocked_until_4 and now < _yt_blocked_until_4:
+                blocked = True
+            idx += 1
+            if not blocked:
+                app.state.yt_key_index = idx % n
+                return key, key_num
+        # no available keys
+        return '', 0
 
 
 
@@ -312,13 +365,23 @@ async def refresh_loop(pool: asyncpg.Pool) -> None:
                     skipped  = [r['tag'] for r in stable_rows if r['video_id'] and (now - stable_last_checked.get(r['tag'], 0) >= STABLE_REFRESH_INTERVAL)]
                     _log.info("[refresh] stable KEY_2 included=%d skipped=%d", len(included), len(skipped))
 
-                # Rotating channels (KEY_1) — only when key1 is available
-                if key1_ok:
-                    rss_results = await asyncio.gather(
-                        *[fetch_channel_video_ids(client, r["channel_id"], YT_KEY_1) for r in rotating_rows],
-                        return_exceptions=True,
-                    )
-                    for row, result in zip(rotating_rows, rss_results):
+                # Rotating channels — fetch recent uploads using round-robin keys
+                rows_for_tasks = []
+                tasks = []
+                for row in rotating_rows:
+                    # pick next available key
+                    key, key_num = await next_yt_key_num()
+                    if not key:
+                        # no key available — skip this row for now
+                        channel_videos[row["tag"]] = []
+                        continue
+                    # stash key_num on client so helper can attribute quota blocks
+                    client._last_key_num = key_num
+                    rows_for_tasks.append(row)
+                    tasks.append(fetch_channel_video_ids(client, row["channel_id"], key))
+                if tasks:
+                    rss_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for row, result in zip(rows_for_tasks, rss_results):
                         vids = result if isinstance(result, list) else []
                         channel_videos[row["tag"]] = vids
                         for vid in vids:
@@ -329,10 +392,15 @@ async def refresh_loop(pool: asyncpg.Pool) -> None:
 
                 # Batch live-checks using the appropriate key per channel type
                 live_ids: set[str] = set()
-                if key2_ok and stable_vids:
-                    live_ids |= await batch_check_live(client, stable_vids, YT_KEY_2, 2)
-                if key1_ok and rotating_vids:
-                    live_ids |= await batch_check_live(client, rotating_vids, YT_KEY_1, 1)
+                # Use round-robin keys for batch video checks
+                if stable_vids:
+                    key, key_num = await next_yt_key_num()
+                    if key:
+                        live_ids |= await batch_check_live(client, stable_vids, key, key_num)
+                if rotating_vids:
+                    key, key_num = await next_yt_key_num()
+                    if key:
+                        live_ids |= await batch_check_live(client, rotating_vids, key, key_num)
 
                 now = time.time()
                 async with pool.acquire() as conn:
@@ -505,6 +573,10 @@ async def lifespan(app: FastAPI):
 
     pool = await asyncpg.create_pool(DATABASE_URL)
     app.state.pool = pool
+    # Initialize YouTube API keys list for round-robin usage
+    app.state.yt_keys = [k for k in (YT_KEY_1, YT_KEY_2, YT_KEY_3, YT_KEY_4) if k]
+    app.state.yt_key_index = 0
+    app.state.yt_key_lock = asyncio.Lock()
     # Track last-checked timestamps for stable-video-id channels so we poll them less often
     app.state.stable_last_checked = {}
     task = asyncio.create_task(refresh_loop(pool))
@@ -945,13 +1017,15 @@ async def admin_lookup_stream(body: dict):
     handle = body.get("handle", "").strip().lstrip("@")
     if not handle:
         raise HTTPException(status_code=400, detail="Handle required")
-    if not YT_KEY_1:
-        raise HTTPException(status_code=503, detail="YT_KEY_1 not configured — cannot look up channel")
+    # pick an available YouTube key
+    key, key_num = await next_yt_key_num()
+    if not key:
+        raise HTTPException(status_code=503, detail="No YouTube API keys configured or all keys are currently blocked")
 
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
             f"https://www.googleapis.com/youtube/v3/channels"
-            f"?part=snippet&forHandle=@{handle}&key={YT_KEY_1}"
+            f"?part=snippet&forHandle=@{handle}&key={key}"
         )
     items = r.json().get("items", [])
     if not items:
@@ -1041,6 +1115,14 @@ async def admin_status():
             "configured": bool(YT_KEY_2),
             "blocked_until": _yt_blocked_until_2 if _yt_blocked_until_2 and now < _yt_blocked_until_2 else None,
         },
+        "yt_key_3": {
+            "configured": bool(YT_KEY_3),
+            "blocked_until": _yt_blocked_until_3 if _yt_blocked_until_3 and now < _yt_blocked_until_3 else None,
+        },
+        "yt_key_4": {
+            "configured": bool(YT_KEY_4),
+            "blocked_until": _yt_blocked_until_4 if _yt_blocked_until_4 and now < _yt_blocked_until_4 else None,
+        },
     }
 
 
@@ -1074,24 +1156,36 @@ async def admin_rescrape_streams(key: Optional[int] = None):
                 seen.add(vid)
                 stable_vids.append(vid)
 
-        # Rotating: activities.list to find recent candidates (KEY_1)
-        rss_results = await asyncio.gather(
-            *[fetch_channel_video_ids(client, r["channel_id"], YT_KEY_1) for r in rotating_rows],
-            return_exceptions=True,
-        )
-        for row, result in zip(rotating_rows, rss_results):
-            vids = result if isinstance(result, list) else []
-            channel_videos[row["tag"]] = vids
-            for vid in vids:
-                if vid not in seen:
-                    seen.add(vid)
-                    rotating_vids.append(vid)
+        # Rotating: activities.list to find recent candidates (round-robin keys)
+        rows_for_tasks = []
+        tasks = []
+        for row in rotating_rows:
+            key, key_num = await next_yt_key_num()
+            if not key:
+                channel_videos[row["tag"]] = []
+                continue
+            client._last_key_num = key_num
+            rows_for_tasks.append(row)
+            tasks.append(fetch_channel_video_ids(client, row["channel_id"], key))
+        if tasks:
+            rss_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for row, result in zip(rows_for_tasks, rss_results):
+                vids = result if isinstance(result, list) else []
+                channel_videos[row["tag"]] = vids
+                for vid in vids:
+                    if vid not in seen:
+                        seen.add(vid)
+                        rotating_vids.append(vid)
 
         live_ids: set[str] = set()
         if stable_vids:
-            live_ids |= await batch_check_live(client, stable_vids, YT_KEY_2, 2)
+            key, key_num = await next_yt_key_num()
+            if key:
+                live_ids |= await batch_check_live(client, stable_vids, key, key_num)
         if rotating_vids:
-            live_ids |= await batch_check_live(client, rotating_vids, YT_KEY_1, 1)
+            key, key_num = await next_yt_key_num()
+            if key:
+                live_ids |= await batch_check_live(client, rotating_vids, key, key_num)
 
         now = time.time()
         updated = 0
